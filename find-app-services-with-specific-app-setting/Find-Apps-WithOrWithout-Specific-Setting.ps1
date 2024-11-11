@@ -59,7 +59,6 @@ function Find-AppServices {
     # Validate that TagName1 and TagValue1 are provided if FilterByTag is $true
     if ($FilterByTag -and ($TagName1 -eq "" -or $TagValue1 -eq "")) {
         throw "When FilterByTag is set to `$true`, both TagName1 and TagValue1 must be provided."
-        return
     }
 
     # Connect to your Azure account
@@ -145,12 +144,17 @@ function Find-AppServices {
 
     # Wait for all jobs to complete and collect results
     foreach ($job in $jobs) {
-        Wait-Job -Job $job | Out-Null
-        $result = Receive-Job -Job $job
-        if ($result) {
-            $appServicesResult += $result
+        try {
+            Wait-Job -Job $job -Timeout 300 | Out-Null
+            $result = Receive-Job -Job $job
+            if ($result) {
+                $appServicesResult += $result
+            }
+        } catch {
+            Write-Host -ForegroundColor Red "Error processing job for app: $($job.Name)"
+        } finally {
+            Remove-Job -Job $job | Out-Null
         }
-        Remove-Job -Job $job | Out-Null
     }
 
     # Output the App Services based on the search type
