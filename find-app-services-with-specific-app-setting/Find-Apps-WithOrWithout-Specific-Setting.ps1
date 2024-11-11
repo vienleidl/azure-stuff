@@ -38,107 +38,128 @@ param (
     [string]$AppSettingKeyName = "YOUR_SETTING_KEY_NAME",
     [ValidateSet("With", "Without")]
     [string]$SearchType        = "With",
-    [bool]$FilterByTag         = $true,
-    [string]$TagName1          = "landscape", # The first tag name to filter by. Required if FilterByTag is $true.
-    [string]$TagValue1         = "production", # The first tag value to filter by. Required if FilterByTag is $true.
+    [bool]$FilterByTag         = $false,
+    [string]$TagName1          = "", # The first tag name to filter by. Required if FilterByTag is $true.
+    [string]$TagValue1         = "", # The first tag value to filter by. Required if FilterByTag is $true.
     [string]$TagName2          = "", # Optional second tag name, e.g., "ms-resource-usage"
     [string]$TagValue2         = ""  # Optional second tag value, e.g., "azure-app-service"
 )
 
-# Connect to your Azure account
-if (-not (Get-AzContext)) {
-    Connect-AzAccount
-    Write-Output "Connected to Azure account."
-} else {
-    Write-Output "Already connected to Azure account."
-}
+function Find-AppServices {
+    param (
+        [string]$AppSettingKeyName,
+        [string]$SearchType,
+        [bool]$FilterByTag,
+        [string]$TagName1,
+        [string]$TagValue1,
+        [string]$TagName2,
+        [string]$TagValue2
+    )
 
-# Get available subscriptions
-$subscriptions = Get-AzSubscription | Sort-Object -Property Name
+    # Validate that TagName1 and TagValue1 are provided if FilterByTag is $true
+    if ($FilterByTag -and ($TagName1 -eq "" -or $TagValue1 -eq "")) {
+        throw "When FilterByTag is set to `$true`, both TagName1 and TagValue1 must be provided."
+        return
+    }
 
-# Prompt user to select a subscription
-$subscriptionNames = $subscriptions.Name
-$selectedSubscription = $subscriptionNames | Out-GridView -Title "Select an Azure Subscription" -OutputMode Single
+    # Connect to your Azure account
+    if (-not (Get-AzContext)) {
+        Connect-AzAccount
+        Write-Output "Connected to Azure account."
+    } else {
+        Write-Output "Already connected to Azure account."
+    }
 
-# Set the selected subscription context
-Set-AzContext -SubscriptionName $selectedSubscription | Out-Null
+    # Get available subscriptions
+    $subscriptions = Get-AzSubscription | Sort-Object -Property Name
 
-# Suppress the warning message
-$WarningPreference = "SilentlyContinue"
+    # Prompt user to select a subscription
+    $subscriptionNames = $subscriptions.Name
+    $selectedSubscription = $subscriptionNames | Out-GridView -Title "Select an Azure Subscription" -OutputMode Single
 
-# Initialize the following with names of existing apps/slots within the specified subscription
-if ($FilterByTag) {
-    $appList = Get-AzWebApp 2>$null | Where-Object {
-        $_.Tags -and $_.Tags[$TagName1] -eq $TagValue1 -and
-        ($TagName2 -eq "" -or $_.Tags[$TagName2] -eq $TagValue2)
-    } | Select-Object Name, ResourceGroup | Sort-Object -Property Name
-} else {
-    $appList = Get-AzWebApp 2>$null | Select-Object Name, ResourceGroup | Sort-Object -Property Name
-}
+    # Set the selected subscription context
+    Set-AzContext -SubscriptionName $selectedSubscription | Out-Null
 
-Write-Host -ForegroundColor Green ("The names of apps which " + ($SearchType -eq "With" ? "have" : "do not have") + " the [" + $AppSettingKeyName + "] setting are being collected...")
+    # Suppress the warning message
+    $WarningPreference = "SilentlyContinue"
 
-$appServicesResult = @()
-$jobs = @()
+    # Initialize the following with names of existing apps/slots within the specified subscription
+    if ($FilterByTag) {
+        $appList = Get-AzWebApp 2>$null | Where-Object {
+            $_.Tags -and $_.Tags[$TagName1] -eq $TagValue1 -and
+            ($TagName2 -eq "" -or $_.Tags[$TagName2] -eq $TagValue2)
+        } | Select-Object Name, ResourceGroup | Sort-Object -Property Name
+    } else {
+        $appList = Get-AzWebApp 2>$null | Select-Object Name, ResourceGroup | Sort-Object -Property Name
+    }
 
-foreach ($app in $appList) {
-    $jobs += Start-Job -ScriptBlock {
-        param ($app, $AppSettingKeyName, $SearchType)
+    Write-Host -ForegroundColor Green ("The names of apps which " + ($SearchType -eq "With" ? "have" : "do not have") + " the [" + $AppSettingKeyName + "] setting are being collected...")
 
-        $appSettings = (Get-AzWebApp -ResourceGroupName $app.ResourceGroup -Name $app.Name -WarningAction SilentlyContinue).SiteConfig.AppSettings
+    $appServicesResult = @()
+    $jobs = @()
 
-        $hasSetting = $false
-        foreach ($setting in $appSettings) {
-            if ($setting.Name -eq $AppSettingKeyName) {
-                $hasSetting = $true
-                break
+    foreach ($app in $appList) {
+        $jobs += Start-Job -ScriptBlock {
+            param ($app, $AppSettingKeyName, $SearchType)
+
+            $appSettings = (Get-AzWebApp -ResourceGroupName $app.ResourceGroup -Name $app.Name -WarningAction SilentlyContinue).SiteConfig.AppSettings
+
+            $hasSetting = $false
+            foreach ($setting in $appSettings) {
+                if ($setting.Name -eq $AppSettingKeyName) {
+                    $hasSetting = $true
+                    break
+                }
             }
-        }
 
-        if (($SearchType -eq "With" -and $hasSetting) -or ($SearchType -eq "Without" -and -not $hasSetting)) {
-            return [PSCustomObject]@{ Name = $app.Name; ResourceGroup = $app.ResourceGroup }
-        }
+            if (($SearchType -eq "With" -and $hasSetting) -or ($SearchType -eq "Without" -and -not $hasSetting)) {
+                return [PSCustomObject]@{ Name = $app.Name; ResourceGroup = $app.ResourceGroup }
+            }
 
-        $appSlots = Get-AzWebAppSlot -ResourceGroupName $app.ResourceGroup -Name $app.Name -WarningAction SilentlyContinue
-        if ($appSlots) {
-            foreach ($appSlot in $appSlots) {
-                $indexOf = $appSlot.Name.IndexOf('/')
-                $slotName = $appSlot.Name.SubString($indexOf + 1)
-                $fullSlotName = Get-AzWebAppSlot -ResourceGroupName $appSlot.ResourceGroup -Name $app.Name -Slot $slotName -WarningAction SilentlyContinue
-                $slotSettings = ($fullSlotName).SiteConfig.AppSettings
+            $appSlots = Get-AzWebAppSlot -ResourceGroupName $app.ResourceGroup -Name $app.Name -WarningAction SilentlyContinue
+            if ($appSlots) {
+                foreach ($appSlot in $appSlots) {
+                    $indexOf = $appSlot.Name.IndexOf('/')
+                    $slotName = $appSlot.Name.SubString($indexOf + 1)
+                    $fullSlotName = Get-AzWebAppSlot -ResourceGroupName $appSlot.ResourceGroup -Name $app.Name -Slot $slotName -WarningAction SilentlyContinue
+                    $slotSettings = ($fullSlotName).SiteConfig.AppSettings
 
-                $slotHasSetting = $false
-                foreach ($setting in $slotSettings) {
-                    if ($setting.Name -eq $AppSettingKeyName) {
-                        $slotHasSetting = $true
-                        break
+                    $slotHasSetting = $false
+                    foreach ($setting in $slotSettings) {
+                        if ($setting.Name -eq $AppSettingKeyName) {
+                            $slotHasSetting = $true
+                            break
+                        }
+                    }
+
+                    if (($SearchType -eq "With" -and $slotHasSetting) -or ($SearchType -eq "Without" -and -not $slotHasSetting)) {
+                        return [PSCustomObject]@{ Name = $appSlot.Name; ResourceGroup = $appSlot.ResourceGroup }
                     }
                 }
-
-                if (($SearchType -eq "With" -and $slotHasSetting) -or ($SearchType -eq "Without" -and -not $slotHasSetting)) {
-                    return [PSCustomObject]@{ Name = $appSlot.Name; ResourceGroup = $appSlot.ResourceGroup }
-                }
             }
-        }
-    } -ArgumentList $app, $AppSettingKeyName, $SearchType
-}
-
-# Display a message indicating the script is processing
-Write-Host -ForegroundColor Yellow "Processing App Services. Please wait..."
-
-# Wait for all jobs to complete and collect results
-foreach ($job in $jobs) {
-    Wait-Job -Job $job | Out-Null
-    $result = Receive-Job -Job $job
-    if ($result) {
-        $appServicesResult += $result
+        } -ArgumentList $app, $AppSettingKeyName, $SearchType
     }
-    Remove-Job -Job $job | Out-Null
+
+    # Display a message indicating the script is processing
+    Write-Host -ForegroundColor Yellow "Processing App Services. Please wait..."
+
+    # Wait for all jobs to complete and collect results
+    foreach ($job in $jobs) {
+        Wait-Job -Job $job | Out-Null
+        $result = Receive-Job -Job $job
+        if ($result) {
+            $appServicesResult += $result
+        }
+        Remove-Job -Job $job | Out-Null
+    }
+
+    # Output the App Services based on the search type
+    if ($appServicesResult.Count -gt 0) {
+        $appServicesResult | Sort-Object Name | Out-GridView -Title ("App Services " + ($SearchType -eq "With" ? "with" : "without") + " the setting '$AppSettingKeyName'")
+    } else {
+        Write-Output ("No App Services found " + ($SearchType -eq "With" ? "with" : "without") + " the setting '$AppSettingKeyName'.")
+    }
 }
 
-# Output the App Services based on the search type
-if ($appServicesResult.Count -gt 0) {
-    $appServicesResult | Sort-Object Name | Out-GridView -Title ("App Services " + ($SearchType -eq "With" ? "with" : "without") + " the setting '$AppSettingKeyName'")
-} else {
-    Write-Output ("No App Services found " + ($SearchType -eq "With" ? "with" : "without") + " the setting '$AppSettingKeyName'.")
-}
+# Call the function
+Find-AppServices -AppSettingKeyName $AppSettingKeyName -SearchType $SearchType -FilterByTag $FilterByTag -TagName1 $TagName1 -TagValue1 $TagValue1 -TagName2 $TagName2 -TagValue2 $TagValue2
